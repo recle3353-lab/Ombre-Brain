@@ -16,6 +16,7 @@ web/ — Dashboard / HTTP 路由层（从 server.py 巨石文件拆出，镜像 
 from . import auth
 from . import tunnel
 from . import oauth
+from . import dashboard
 
 
 def register_all(mcp) -> None:
@@ -23,3 +24,4 @@ def register_all(mcp) -> None:
     auth.register(mcp)
     tunnel.register(mcp)
     oauth.register(mcp)
+    dashboard.register(mcp)

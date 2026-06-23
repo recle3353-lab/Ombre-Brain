@@ -42,11 +42,34 @@ logger = logging.getLogger("ombre_brain")
 # --- 注入的运行期配置（server.py 启动时 init 进来）---
 config: dict = {}
 
+# --- 注入的业务引擎与运行期信息（类比 tools/_runtime；server.py 启动时 init_runtime）---
+# 各 web 路由模块通过 sh.<name> 读取，避免和 server.py 各持一份不一致。
+# embedding_engine 会被热重载替换 —— 替换方必须写 sh.embedding_engine（属性赋值），
+# 这样所有模块下次读 sh.embedding_engine 都拿到新实例。
+version: str = ""
+repo_root: str = ""   # 仓库根目录（server.py 注入；用于定位 frontend/ 等，避免各模块各算 __file__）
+bucket_mgr = None
+dehydrator = None
+decay_engine = None
+embedding_engine = None
+import_engine = None
+migrate_engine = None
+github_sync_instance = None
+
 
 def init(cfg: dict) -> None:
     """启动时由 server.py 调用，注入全局 config。"""
     global config
     config = cfg
+
+
+def init_runtime(**kwargs) -> None:
+    """启动时注入业务引擎与版本等运行期对象。
+
+    用法：init_runtime(version=..., bucket_mgr=..., decay_engine=..., ...)
+    只更新传入的键，未传的保持不变。
+    """
+    globals().update(kwargs)
 
 
 # --- Dashboard 鉴权常量（原 server.py 调参面板）---

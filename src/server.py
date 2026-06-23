@@ -330,6 +330,20 @@ mcp_extra.settings.streamable_http_path = "/mcp-extra"
 import web as _web
 import web._shared as _wsh
 _wsh.init(config)
+# 注入业务引擎/版本/仓库根目录到 web 层（类比 tools/_runtime）。
+# 注意：embedding_engine 会被热重载替换 —— 待 embedding/config 路由迁到 web/ 时，
+# 替换处须同时写 _wsh.embedding_engine（目前这些路由仍在本文件、仍走 global）。
+_wsh.init_runtime(
+    version=__version__,
+    repo_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    bucket_mgr=bucket_mgr,
+    dehydrator=dehydrator,
+    decay_engine=decay_engine,
+    embedding_engine=embedding_engine,
+    import_engine=import_engine,
+    migrate_engine=migrate_engine,
+    github_sync_instance=github_sync_instance,
+)
 from web._shared import (  # noqa: F401  (re-export for not-yet-migrated routes below)
     _sessions,
     _is_authenticated, _is_setup_needed, _verify_any_password,
@@ -347,108 +361,8 @@ _web.register_all(mcp)
 
 
 # =============================================================
-# /health endpoint: lightweight keepalive
-# 轻量保活接口
-# For Cloudflare Tunnel or reverse proxy to ping, preventing idle timeout
-# 供 Cloudflare Tunnel 或反代定期 ping，防止空闲超时断连
+# 根仪表板 / 静态资源 / favicon / /health —— 已拆分到 web/dashboard.py
 # =============================================================
-@mcp.custom_route("/", methods=["GET"])
-async def root_dashboard(request: Request) -> Response:
-    """Serve dashboard HTML directly at root.
-
-    历史上 / 会 307 → /dashboard，但叠加 Cloudflare Tunnel 的 Always Use HTTPS /
-    Page Rule 时容易触发 ERR_TOO_MANY_REDIRECTS。直接返回 HTML，少一次跳转，
-    既能修复回环，也省一个 RTT。
-    """
-    from starlette.responses import HTMLResponse
-    import os
-    import html as _html
-    dashboard_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "frontend",
-        "dashboard.html",
-    )
-    try:
-        with open(dashboard_path, "r", encoding="utf-8") as f:
-            html = f.read()
-        # U-09 fix: cache-bust static SVG assets so logo updates are visible
-        # without manual hard-refresh after upgrade. Version comes from
-        # <repo_root>/VERSION via __version__; only literal /static/*.svg URLs
-        # are touched (no regex over arbitrary HTML).
-        for asset in ("/static/icon.svg", "/static/favicon.svg"):
-            html = html.replace(asset, f"{asset}?v={__version__}")
-        return HTMLResponse(html)
-    except FileNotFoundError:
-        # 走到这里 = 部署目录里缺 frontend/dashboard.html。它本应随仓库一起下发
-        # （已纳入 git，未被 .gitignore 排除），所以最常见原因是克隆/部署了旧版本。
-        # 给一条能自解释的提示，避免被误判成「神秘 bug / gitignore 问题」。
-        return HTMLResponse(
-            "<h1>dashboard.html not found</h1>"
-            f"<p>Expected at: <code>{_html.escape(dashboard_path)}</code></p>"
-            "<p>This file ships with the repo (it is committed and NOT git-ignored). "
-            "A missing file almost always means an outdated checkout — "
-            "run <code>git pull origin main</code> / re-clone, or rebuild your Docker image, "
-            "then restart.</p>",
-            status_code=404,
-        )
-
-
-# iter 1.7 §C/§H: serve frontend static assets (icon.svg, favicon.svg, manifest.json)
-# 给前端供静态资源（OB logo / favicon / PWA manifest）。
-# 安全要点：必须白名单过滤文件名，绝不能让 request 直接拼路径，
-# 否则会被 ?name=../../etc/passwd 这种「目录穿越」攻击拿走任意文件。
-@mcp.custom_route("/static/{name}", methods=["GET"])
-async def static_asset(request: Request) -> Response:
-    from starlette.responses import Response, JSONResponse
-    # request.path_params 是 starlette 解析路径占位符 {name} 得到的字典
-    name = request.path_params.get("name", "")
-    # 白名单：只允许这三个名字 + 顺便记下各自的 MIME 类型
-    # 用 dict 而不是 set，是因为还要查表知道返回什么 Content-Type
-    allowed = {
-        "icon.svg": "image/svg+xml",
-        "favicon.svg": "image/svg+xml",
-        "manifest.json": "application/manifest+json",
-        "RRPL.ttf": "font/truetype",
-    }
-    if name not in allowed:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    # 物理路径 = <repo_root>/frontend/<name>
-    # __file__ 是当前 .py 的绝对路径 → dirname 取目录 → 再 dirname 上一层 = repo_root
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "frontend",
-        name,
-    )
-    try:
-        # "rb" = read binary。SVG 是文本，但用二进制读对所有类型都安全
-        with open(path, "rb") as f:
-            return Response(f.read(), media_type=allowed[name])
-    except FileNotFoundError:
-        # 镜像里如果漏 COPY frontend/ 会跑这条
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-
-# Convenience: /favicon.ico → /static/favicon.svg (browsers default-fetch favicon.ico)
-# 浏览器打开任意页都会自动请求 /favicon.ico，没有就报 404 污染日志。
-# 这里 301 永久重定向到 SVG 版本，浏览器后续会缓存这个跳转。
-@mcp.custom_route("/favicon.ico", methods=["GET"])
-async def favicon_redirect(request: Request) -> Response:
-    from starlette.responses import RedirectResponse
-    return RedirectResponse(url="/static/favicon.svg", status_code=301)
-
-
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request: Request) -> Response:
-    from starlette.responses import JSONResponse
-    try:
-        stats = await bucket_mgr.get_stats()
-        return JSONResponse({
-            "status": "ok",
-            "buckets": stats["permanent_count"] + stats["dynamic_count"],
-            "decay_engine": "running" if decay_engine.is_running else "stopped",
-        })
-    except Exception as e:
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
 # =============================================================
