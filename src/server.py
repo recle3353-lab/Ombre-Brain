@@ -4306,6 +4306,77 @@ async def api_update_info(request: Request) -> Response:
 
 
 # =============================================================
+# /api/do-update — 热更新：从 GitHub 下载最新 src+frontend，覆盖后重启
+# 需要登录认证；执行完毕后进程退出，由 Docker restart policy 重新拉起。
+# =============================================================
+@mcp.custom_route("/api/do-update", methods=["POST"])
+async def api_do_update(request: Request) -> Response:
+    from starlette.responses import StreamingResponse
+    import asyncio as _asyncio, zipfile as _zipfile, io as _io, os as _os, sys as _sys
+
+    err = _require_auth(request)
+    if err:
+        return err
+
+    async def _stream():
+        try:
+            yield "data: 正在连接 GitHub…\n\n"
+            await _asyncio.sleep(0.1)
+
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                yield "data: 正在下载最新版本 ZIP…\n\n"
+                r = await client.get(
+                    "https://github.com/P0luz/Ombre-Brain/archive/refs/heads/main.zip"
+                )
+                r.raise_for_status()
+
+            yield "data: 下载完成，正在解压文件…\n\n"
+            await _asyncio.sleep(0.1)
+
+            zip_bytes = r.content
+            with _zipfile.ZipFile(_io.BytesIO(zip_bytes)) as zf:
+                # GitHub archive root: "Ombre-Brain-main/"
+                prefix_src      = "Ombre-Brain-main/src/"
+                prefix_frontend = "Ombre-Brain-main/frontend/"
+                updated = 0
+                for member in zf.namelist():
+                    for prefix, dest_root in [
+                        (prefix_src,      "/app/src"),
+                        (prefix_frontend, "/app/frontend"),
+                    ]:
+                        if member.startswith(prefix):
+                            rel  = member[len(prefix):]
+                            dest = _os.path.join(dest_root, rel)
+                            if member.endswith("/"):
+                                _os.makedirs(dest, exist_ok=True)
+                            else:
+                                _os.makedirs(_os.path.dirname(dest), exist_ok=True)
+                                with zf.open(member) as sf:
+                                    with open(dest, "wb") as df:
+                                        df.write(sf.read())
+                                updated += 1
+
+            yield f"data: 已更新 {updated} 个文件，即将重启服务…\n\n"
+            await _asyncio.sleep(0.5)
+            yield "data: RESTART\n\n"
+
+            # 退出进程 → Docker restart policy 重新拉起（加载新代码）
+            async def _exit():
+                await _asyncio.sleep(0.8)
+                _os._exit(0)
+            _asyncio.create_task(_exit())
+
+        except Exception as e:
+            yield f"data: ERROR:{e}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# =============================================================
 # /api/author — iter 1.7 §H 作者有话说（静态文本，公开）
 # 这段文字由作者本人维护，前端只读展示，不开放编辑。
 # 把它写成模块级常量 dict，是因为：

@@ -2112,26 +2112,38 @@
         <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin:10px 0 4px;">更新说明</div>
         <div class="ver-notes-box" id="ver-notes-box">—</div>
 
-        <div style="font-size:12px;font-weight:600;color:var(--warning);margin:14px 0 6px;">⚠ 更新前请先完成以下步骤</div>
-        <ul class="ver-checklist">
-          <li><span style="color:var(--accent);font-weight:600;">①</span> <span>截图或记录下方「当前部署信息」（端口、目录、访问地址等）</span></li>
-          <li><span style="color:var(--accent);font-weight:600;">②</span> <span>点「导出记忆备份」下载 .zip 存档，更新后如有问题可从「导入」恢复</span></li>
-          <li><span style="color:var(--accent);font-weight:600;">③</span> <span>在 VPS / 宿主机执行下方更新命令，完成后确认服务已恢复</span></li>
-        </ul>
-
-        <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin:10px 0 4px;">当前部署信息（建议截图）</div>
+        <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin:10px 0 4px;">当前部署信息（建议截图保存）</div>
         <div class="ver-deploy-info" id="ver-deploy-info">载入中…</div>
 
-        <div style="display:flex;gap:8px;align-items:center;margin:12px 0 4px;">
-          <button class="btn-primary" onclick="downloadExport()" style="height:34px;padding:0 14px;font-size:12px;display:inline-flex;align-items:center;gap:5px;">
-            <i data-lucide="download"></i> 导出记忆备份
+        <div style="font-size:12px;font-weight:600;color:var(--warning);margin:16px 0 8px;">⚠ 更新前请先完成以下两步</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+          <button class="btn-primary" onclick="downloadExport()" id="btn-export-before-update" style="height:34px;padding:0 14px;font-size:12px;display:inline-flex;align-items:center;gap:5px;">
+            <i data-lucide="download"></i> ① 导出记忆备份
           </button>
-          <span style="font-size:11px;color:var(--text-dim);">下载 .zip，包含所有 bucket + embedding 数据库</span>
+          <span style="font-size:11px;color:var(--text-dim);">下载 .zip，更新失败时可从「导入」恢复</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:16px;line-height:1.7;">
+          ② 截图上方部署信息（端口、数据目录、访问地址），以备不时之需。
         </div>
 
-        <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin:14px 0 4px;">更新命令（在 VPS / 宿主机执行）</div>
-        <div class="ver-cmd-box" id="ver-cmd-box" title="点击可全选，Ctrl+C 复制">—</div>
-        <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">点击命令框即全选，Ctrl+C 复制后在宿主机终端粘贴执行</div>
+        <!-- 热更新按钮 -->
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:4px;">
+          <button class="btn-primary" onclick="doHotUpdate()" id="btn-hot-update"
+            style="height:38px;padding:0 20px;font-size:13px;display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:#fff;">
+            <i data-lucide="zap"></i> 立即热更新
+          </button>
+          <span style="font-size:11px;color:var(--text-dim);margin-left:10px;">
+            服务端自动下载新版并重启，记忆数据不受影响
+          </span>
+        </div>
+
+        <!-- 更新进度日志 -->
+        <div id="ver-update-log" style="display:none;margin-top:12px;">
+          <div class="ver-deploy-info" id="ver-log-box" style="min-height:60px;white-space:pre-wrap;"></div>
+          <div id="ver-update-done" style="display:none;margin-top:8px;font-size:13px;font-weight:600;color:var(--positive);">
+            ✓ 更新完成！页面将自动刷新…
+          </div>
+        </div>
       </div>
     </div>
 
@@ -5602,6 +5614,76 @@ loadVersionBadge();
 
     panel.style.display = '';
   }
+
+  window.doHotUpdate = async function() {
+    var btn = document.getElementById('btn-hot-update');
+    var logWrap = document.getElementById('ver-update-log');
+    var logBox  = document.getElementById('ver-log-box');
+    var doneEl  = document.getElementById('ver-update-done');
+
+    if (!confirm('确认开始热更新？\n\n请确保已导出记忆备份，更新期间服务会短暂重启（约 10-30 秒）。')) return;
+
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> 更新中…'; lucide.createIcons(); }
+    if (logWrap) logWrap.style.display = '';
+    if (logBox)  logBox.textContent = '';
+    if (doneEl)  doneEl.style.display = 'none';
+
+    var log = function(line) { if (logBox) logBox.textContent += line + '\n'; };
+
+    try {
+      var r = await fetch(BASE + '/api/do-update', { method: 'POST', credentials: 'include' });
+      if (!r.ok) { log('请求失败：' + r.status); return; }
+
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var restarting = false;
+
+      while (true) {
+        var chunk = await reader.read();
+        if (chunk.done) break;
+        var text = decoder.decode(chunk.value);
+        // SSE lines: "data: ...\n\n"
+        text.split('\n').forEach(function(line) {
+          if (!line.startsWith('data:')) return;
+          var msg = line.slice(5).trim();
+          if (!msg) return;
+          if (msg === 'RESTART') {
+            restarting = true;
+            log('服务重启中，请稍候…');
+          } else if (msg.startsWith('ERROR:')) {
+            log('❌ ' + msg.slice(6));
+          } else {
+            log(msg);
+          }
+        });
+        if (restarting) break;
+      }
+
+      if (restarting) {
+        // 轮询 /api/version 直到服务恢复
+        var newVer = null;
+        for (var i = 0; i < 30; i++) {
+          await new Promise(function(res) { setTimeout(res, 2000); });
+          try {
+            var vr = await fetch(BASE + '/api/version');
+            if (vr.ok) { var vd = await vr.json(); newVer = vd.version; break; }
+          } catch(_) {}
+          log('等待服务恢复…');
+        }
+        if (newVer) {
+          log('服务已恢复，新版本：v' + newVer);
+          if (doneEl) doneEl.style.display = '';
+          setTimeout(function() { location.reload(); }, 2500);
+        } else {
+          log('服务未在预期时间内恢复，请手动刷新页面。');
+        }
+      }
+    } catch(e) {
+      log('连接中断：' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="zap"></i> 立即热更新'; lucide.createIcons(); }
+    }
+  };
 
   window.checkGitHubVersion = async function() {
     var btnCheck  = document.getElementById('btn-check-ver');
