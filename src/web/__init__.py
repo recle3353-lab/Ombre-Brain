@@ -25,6 +25,7 @@ from . import letters
 from . import hooks
 from . import buckets
 from . import import_api
+from . import github
 
 
 def register_all(mcp) -> None:
@@ -41,3 +42,4 @@ def register_all(mcp) -> None:
     hooks.register(mcp)
     buckets.register(mcp)
     import_api.register(mcp)
+    github.register(mcp)

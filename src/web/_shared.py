@@ -93,6 +93,7 @@ def _mark_op(name: str = "") -> None:
 fire_webhook = None            # async def(event: str, payload: dict) -> None
 write_deletion_notice = None   # def(names: list) -> None
 pop_deletion_notice = None     # def() -> str
+restart_github_auto_task = None # def(interval_minutes: int) -> None（起停后台 GitHub 同步任务）
 
 
 # --- 项目 .env 读写（config / env-config / host-vault 路由共用，故放共享层）---

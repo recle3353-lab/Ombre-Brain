@@ -241,16 +241,16 @@ async def _github_sync_loop(interval_minutes: int) -> None:
     import asyncio
     logger.info(f"[github_sync] auto-sync loop started, interval={interval_minutes}min")
     # 首次先做一次验证，确认连接可用
-    if github_sync_instance and not github_sync_instance.is_validated:
+    if _wsh.github_sync_instance and not _wsh.github_sync_instance.is_validated:
         try:
-            result = await github_sync_instance.validate()
+            result = await _wsh.github_sync_instance.validate()
             if not result.get("ok"):
                 logger.warning(f"[github_sync] auto-sync: validate failed: {result.get('error')} — loop will retry next cycle")
         except Exception as e:
             logger.warning(f"[github_sync] auto-sync: validate exception: {e}")
     while True:
         await asyncio.sleep(interval_minutes * 60)
-        inst = github_sync_instance  # 读当前全局引用（config 更新可能替换实例）
+        inst = _wsh.github_sync_instance  # 读当前全局引用（config 更新可能替换实例）
         if inst is None:
             logger.info("[github_sync] auto-sync: instance gone, stopping loop")
             return
@@ -284,7 +284,7 @@ def _restart_github_auto_task(interval_minutes: int) -> None:
     if _github_auto_task and not _github_auto_task.done():
         _github_auto_task.cancel()
         _github_auto_task = None
-    if interval_minutes > 0 and github_sync_instance is not None:
+    if interval_minutes > 0 and _wsh.github_sync_instance is not None:
         try:
             loop = asyncio.get_event_loop()
             _github_auto_task = loop.create_task(_github_sync_loop(interval_minutes))
@@ -343,6 +343,7 @@ _wsh.init_runtime(
     import_engine=import_engine,
     migrate_engine=migrate_engine,
     github_sync_instance=github_sync_instance,
+    restart_github_auto_task=_restart_github_auto_task,
 )
 from web._shared import (  # noqa: F401  (re-export for not-yet-migrated routes below)
     _sessions,
@@ -1845,118 +1846,8 @@ from web._shared import _project_env_path, _read_env_var, _write_env_var  # noqa
 
 
 # =============================================================
-# /api/github/* — GitHub 同步路由
+# /api/github/* —— 已拆分到 web/github.py
 # =============================================================
-
-@mcp.custom_route("/api/github/status", methods=["GET"])
-async def api_github_status(request: Request) -> Response:
-    from starlette.responses import JSONResponse
-    err = _require_auth(request)
-    if err:
-        return err
-    _gh_cfg_now = config.get("github_sync", {}) or {}
-    _auto_min = int(_gh_cfg_now.get("auto_interval_minutes") or 0)
-    if github_sync_instance is None:
-        return JSONResponse({
-            "ok": True,
-            "configured": False,
-            "repo": _gh_cfg_now.get("repo", ""),
-            "branch": _gh_cfg_now.get("branch", "main"),
-            "path_prefix": _gh_cfg_now.get("path_prefix", "ombre"),
-            "token_set": bool(os.environ.get("OMBRE_GITHUB_TOKEN") or _gh_cfg_now.get("token")),
-            "auto_interval_minutes": _auto_min,
-        })
-    return JSONResponse({"ok": True, "configured": True, "auto_interval_minutes": _auto_min, **github_sync_instance.status()})
-
-
-@mcp.custom_route("/api/github/config", methods=["POST"])
-async def api_github_config(request: Request) -> Response:
-    global github_sync_instance
-    from starlette.responses import JSONResponse
-    err = _require_auth(request)
-    if err:
-        return err
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"ok": False, "error": "无效 JSON"}, status_code=400)
-
-    token = str(body.get("token") or "").strip()
-    repo = str(body.get("repo") or "").strip()
-    branch = str(body.get("branch") or "main").strip() or "main"
-    path_prefix = str(body.get("path_prefix") or "ombre").strip()
-    auto_interval = int(body.get("auto_interval_minutes") or 0)
-
-    if not token and not repo:
-        # 清空配置
-        github_sync_instance = None
-        _restart_github_auto_task(0)
-        gh_cfg = config.setdefault("github_sync", {})
-        gh_cfg["repo"] = ""
-        gh_cfg["branch"] = branch
-        gh_cfg["path_prefix"] = path_prefix
-        gh_cfg["auto_interval_minutes"] = 0
-        return JSONResponse({"ok": True, "message": "已清空 GitHub 同步配置"})
-
-    # 持久化到 config.yaml（含 token，config.yaml 是 bind mount 重启不丢）
-    gh_cfg = config.setdefault("github_sync", {})
-    if token:
-        gh_cfg["token"] = token
-    gh_cfg["repo"] = repo
-    gh_cfg["branch"] = branch
-    gh_cfg["path_prefix"] = path_prefix
-    gh_cfg["auto_interval_minutes"] = auto_interval
-    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
-    try:
-        save_config: dict = {}
-        if os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                save_config = yaml.safe_load(f) or {}
-        sc_gh = save_config.setdefault("github_sync", {})
-        if token:
-            sc_gh["token"] = token
-        sc_gh["repo"] = repo
-        sc_gh["branch"] = branch
-        sc_gh["path_prefix"] = path_prefix
-        sc_gh["auto_interval_minutes"] = auto_interval
-        with open(config_path, "w", encoding="utf-8") as f:
-            yaml.dump(save_config, f, allow_unicode=True, default_flow_style=False)
-    except Exception as e:
-        logger.warning(f"[github] config.yaml 写入失败: {e}")
-
-    # 重建实例
-    _tok = token or config.get("github_sync", {}).get("token") or os.environ.get("OMBRE_GITHUB_TOKEN", "")
-    github_sync_instance = GitHubSync(token=_tok, repo=repo, branch=branch, path_prefix=path_prefix)
-    # 重启定时任务
-    _restart_github_auto_task(auto_interval)
-    return JSONResponse({"ok": True, "message": "配置已保存"})
-
-
-@mcp.custom_route("/api/github/validate", methods=["POST"])
-async def api_github_validate(request: Request) -> Response:
-    from starlette.responses import JSONResponse
-    err = _require_auth(request)
-    if err:
-        return err
-    if github_sync_instance is None:
-        return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步"}, status_code=400)
-    result = await github_sync_instance.validate()
-    return JSONResponse(result)
-
-
-@mcp.custom_route("/api/github/sync", methods=["POST"])
-async def api_github_sync(request: Request) -> Response:
-    from starlette.responses import JSONResponse
-    err = _require_auth(request)
-    if err:
-        return err
-    if github_sync_instance is None:
-        return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步，请先填写配置并保存"}, status_code=400)
-    buckets_dir = config.get("buckets_dir", "")
-    if not buckets_dir:
-        return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
-    result = await github_sync_instance.sync(buckets_dir)
-    return JSONResponse(result)
 
 
 # =============================================================
