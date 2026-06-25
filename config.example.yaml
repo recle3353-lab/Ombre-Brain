@@ -60,7 +60,7 @@ dehydration:
   #   vLLM:        http://localhost:8000/v1
   #   Gemini:      https://generativelanguage.googleapis.com/v1beta/openai
   # api_key: ""    # ⚠️ Use env var OMBRE_COMPRESS_API_KEY instead / 请使用环境变量 OMBRE_COMPRESS_API_KEY
-  max_tokens: 1024
+  max_tokens: 4096
   temperature: 0.1
 
 # --- Decay parameters / 记忆衰减参数 ---
